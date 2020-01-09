@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Scrub</title>
+    <meta charset="utf-8">
+    <style type="text/css">
+        body {
+            font-family: "Helvetica Neue", sans-serif;
+            font-size: 20px;
+            
+            -moz-user-select: none;
+            -khtml-user-select: none;
+            -webkit-user-select: none;
+            user-select: none;
+            
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        /* 
+        TODO: media queries
+        */
+        
+        #wrapper {
+            width: 642px;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        h1 {
+            font-size: 128px;
+            font-weight: 200;
+            margin: 0;
+            font-weight: 200;
+            text-align: center;
+        }
+
+        p {
+            margin: 10px 0;
+        }
+        
+        .icons {
+            font-size: 128px;
+            margin: 0;
+        }
+        
+        .credits {
+            margin: 50px 0;
+            font-size: 30px;
+            font-weight: 200;
+            text-align: center;
+        }
+        
+        a:any-link {
+            color: #393;
+            text-decoration: none;
+        }
+        
+        .scrub {
+            display: flex;
+            flex-direction: column;
+            cursor: grab;
+            margin: 20px 0;
+        }
+        
+        .scrub:active {
+            cursor: grabbing;
+        }
+        
+        .scrub video {
+            margin-bottom: 2px;
+        }
+
+        img {
+            margin: 0 auto;
+        }
+        
+        
+    </style>
+    <meta name="viewport" content="width=642, user-scalable=no">
+</head>
+<body>
+    <h1>scrub</h1>
+    <div id="wrapper">
+        <p>
+            Here's an animated gif from the Wikipedia article on the <a href="https://en.wikipedia.org/wiki/Fourier_transform">Fourier transform</a>.
+        </p>
+        <img width=500 src="Fourier_transform_time_and_frequency_domains.gif" alt="fourier transform animation">
+        <p>
+            While <a href="https://twitter.com/lucasvb">Lucas</a>'s animation is great, an auto-playing gif is not ideal.
+        </p>
+        <p>
+            The animation has to be pretty slow, so the viewer has time to follow.
+            And if I want to see part of the animation again, I have to wait for it to loop back.
+        </p>
+        <p>
+            To adress these shortcomings, I made a nicer player for gifs like this one. <em>Note: it only works in Safari right now.</em>
+        </p>
+        <div id="fourier"></div>
+        <p>
+            You can play the video just like before,
+            but you can also grab the overview strip at the bottom to move through the animation at your own pace.
+            It works backwards too!
+        </p>
+        <p>
+            Because the video is looping, the strip loops back on itself, with no start and end.
+        </p>
+        <p>
+            Non-looping animations also work nicely.
+            Here's a time-lapse I made:
+        </p>
+        <div id="purple"></div>
+        <p>
+            It's really fun to grab and <em>throw</em> the strip. Try it!
+        </p>
+        <p class="credits">
+            by <a href="http://pontus.granstrom.me">Pontus Granström</a></a>
+        </p>
+    </div>
+    <script>
+        const tau = 2 * Math.PI;
+        
+        const scrub = ({containerSelector = null, videoUrl = null, loop = false}) => {
+            
+            if (!containerSelector) {
+                console.error("You need to specify a containerSelector.");
+                return;
+            }
+            
+            if (!videoUrl) {
+                console.error("You need to specify a videoUrl.");
+                return;
+            }
+            
+            // constants
+            const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+            
+            const friction = 5;
+            const springStrength = 100;
+            
+            const scrubberWidth = 642;
+            
+            const stripHeight = isMobile ? 100 : 50;
+            const extraHeight = 20;
+            
+            const container = document.querySelector(containerSelector);
+            container.classList.add("scrub")
+            
+            //
+            // ! create video
+            //
+            const video = document.createElement("video");
+            {
+                video.playsInline = true;
+                video.loop = loop;
+                // load as blob to force loading entire video
+                let req = new XMLHttpRequest();
+                req.open("GET", videoUrl, true);
+                req.responseType = "blob";
+                
+                req.onload = function () {
+                    // Onload is triggered even on 404
+                    // so we need to check the status code
+                    if (this.status === 200) {
+                        var videoBlob = this.response;
+                        video.src = URL.createObjectURL(videoBlob);
+                    }
+                }
+                
+                req.onerror = function () {
+                    // TODO: handle Error
+                }
+                
+                req.send();
+                container.appendChild(video);
+            }
+            
+            
+            const canvas = document.createElement("canvas");
+            {
+                canvas.width = scrubberWidth;
+                canvas.height = stripHeight + extraHeight;
+                canvas.classList.add("scrubber");
+                container.appendChild(canvas);
+            }
+            const context = canvas.getContext("2d");
+            
+            
+            // rounded corners on desktop
+            if (!isMobile) {
+                video.style.borderRadius = "10px 10px 0 0";
+                canvas.style.borderRadius = "0 0 10px 10px";
+            }
+            
+            
+            
+            // playButton dimensions
+            const playButtonRadius = canvas.height / 3;
+            const margin = canvas.height / 2 - playButtonRadius;
+            const offsetFromBorder = playButtonRadius + margin;
+            const playButtonPosition = { x: offsetFromBorder, y: offsetFromBorder };
+            
+            
+            const playButton = document.createElement("canvas");
+            
+            //
+            // ! generate thumbnails
+            //
+            
+            // TODO: use tiled frames https://ffmpeg.org/ffmpeg-filters.html#tile
+            // TODO: use each pixel from the next frame, like rolling shutter,
+            //       to show the animation better
+            
+            let thumbnailStrip = null;
+            let thumbnailStripWidth = 0;
+            if (video) {
+                video.addEventListener("canplay", () => {            
+                    const thumbnailWantedDuration = 5; // seconds
+                    const thumbnailWantedCount = Math.ceil(video.duration / thumbnailWantedDuration);
+                    const thumbnailCount = Math.max(10, thumbnailWantedCount);
+                    const thumbnailDuration = video.duration / thumbnailCount; // seconds
+                    
+                    const aspectRatio = video.videoWidth / video.videoHeight;
+                    const thumbnailHeight = canvas.height;
+                    const thumbnailWidth = thumbnailHeight * aspectRatio;
+                    
+                    // TODO: figure out @2x
+                    thumbnailStrip = document.createElement("canvas");
+                    thumbnailStrip.style.display = "hidden"; // fake offscreen canvas
+                    thumbnailStripWidth = thumbnailWidth * thumbnailCount
+                    thumbnailStrip.width = thumbnailStripWidth;
+                    thumbnailStrip.height = thumbnailHeight;
+                    
+                    const context = thumbnailStrip.getContext("2d");
+                    
+                    // Can only draw frames by seeking there in the video
+                    // Seeking is an asynchronous operation
+                    // So we cannot just loop, have to use callbacks
+                    
+                    let currentFrameIndex = 0;
+                    const drawFrame = () => {
+                        context.drawImage(video,
+                        thumbnailWidth * currentFrameIndex, 0,
+                        thumbnailWidth, thumbnailHeight);
+                        
+                        currentFrameIndex += 1;
+                        const videoFraction = (currentFrameIndex + 0.5) / thumbnailCount;
+                        const newTime = videoFraction * video.duration;
+                        
+                        if (videoFraction >= 1) {
+                            video.removeEventListener("seeked", drawFrame);
+                            video.currentTime = 0;
+                        }
+                        
+                        video.currentTime = videoFraction * video.duration;
+                    }
+                    
+                    video.addEventListener("seeked", drawFrame);
+                    video.currentTime = 0;
+                });
+            }
+            
+            // position limits
+            const positionMin = 0;
+            const positionMax = 1;
+            const positionRange = positionMax - positionMin;
+            
+            // state
+            let previousDragPixelPositionX = 0;
+            let previousDragTime = 0;
+            let isDragging = false;
+            
+            let position = 0; // in [0, 1)
+            let previousPosition = 0;
+            let velocity = 0;
+            
+            const hasVideoEnded = () => (position > 0.999) && (! loop);
+            
+            //
+            // ! events
+            //
+            
+            const pixelPositionFromEvent = (event) => {
+                const bounds = canvas.getBoundingClientRect();
+                return {
+                    x: event.clientX - bounds.x, 
+                    y: event.clientY - bounds.y
+                }
+            };
+            
+            const down = (pixelPosition, time) => {
+                const delta = { 
+                    x: pixelPosition.x - playButtonPosition.x, 
+                    y: pixelPosition.y - playButtonPosition.y,
+                };
+                const distance = Math.sqrt(Math.pow(delta.x, 2) + Math.pow(delta.y, 2));
+                const touchTargetRadius = 
+                isMobile
+                ? playButtonRadius + 20
+                : playButtonRadius;
+                const isOverButton = distance < touchTargetRadius;
+                if (isOverButton) {
+                    if (video.paused) {
+                        if (hasVideoEnded()) {
+                            position = 0;
+                            video.currentTime = 0;
+                        } 
+                        video.play();
+                    } else {
+                        video.pause();
+                    }
+                    return;
+                }
+                
+                // we are dragging
+                video.pause();
+                isDragging = true;
+                previousDragPixelPositionX = pixelPosition.x;
+                previousDragTime = time;
+            }
+            container.addEventListener("mousedown", event => {
+                down(pixelPositionFromEvent(event), event.timeStamp);
+            });
+            container.addEventListener("touchstart", event => {
+                event.preventDefault(); // prevent scrolling page
+                down(pixelPositionFromEvent(event.touches[0]), event.timeStamp);
+                
+                // play/pause videos to make iOS load them
+                const HAVE_ENOUGH_DATA = 4;
+                if (video.readyState !== HAVE_ENOUGH_DATA) {
+                    const promise = video.play();
+                    if (promise) {
+                        promise.then(() => {
+                            video.pause();
+                        })
+                    } else {
+                        video.pause();
+                    }
+                }
+            });
+            
+            const move = (pixelPosition, time) => {
+                if (isDragging) {
+                    const deltaPosition = - (pixelPosition.x - previousDragPixelPositionX) / thumbnailStripWidth;
+                    const deltaTime = (time - previousDragTime) / 1000; // seconds
+                    
+                    previousDragPixelPositionX = pixelPosition.x;
+                    previousDragTime = time;
+                    previousPosition = position;
+                    
+                    // scale position when we move outside range, to make it feel like it's pulling back
+                    // (without having to work directly with forces, which would make scrubbing feel sluggish)
+                    if (position < positionMin
+                    || position > positionMax
+                    ) {
+                        position += deltaPosition / 3;
+                    } else {
+                        position += deltaPosition;
+                    }
+                    // TODO: velocity might need to be smoothed, so it always feels right when releasing
+                    
+                    // upper limit on velocity, try to avoid it jumping away
+                    velocity = Math.min(deltaPosition / deltaTime, 10000);
+                }
+            };
+            document.addEventListener("mousemove", event => {
+                move(pixelPositionFromEvent(event), event.timeStamp);
+            });
+            document.addEventListener("touchmove", event => {
+                event.preventDefault();
+                move(pixelPositionFromEvent(event.touches[0]), event.timeStamp);
+            });
+            
+            const up = () => {
+                isDragging = false;
+            };
+            document.addEventListener("mouseup", up);
+            document.addEventListener("touchend", up);
+            
+            // 
+            // ! loop
+            //
+            
+            let previousFrameTime = performance.now();
+            const tick = (time) => {
+                //
+                // ! simulate
+                //
+                
+                const dt = (time - previousFrameTime) / 1000; // seconds
+                previousFrameTime = time;
+                
+                if (!isDragging) {
+                    let force = 0;
+                    let realFriction = friction;
+                    const criticalDampingFriction = 2 * Math.sqrt(springStrength);
+                    
+                    if (position < positionMin) {
+                        force += springStrength * (positionMin - position);
+                        realFriction = criticalDampingFriction;
+                    }
+                    
+                    if (position > positionMax) {
+                        force += springStrength * (positionMax - position);
+                        realFriction = criticalDampingFriction;
+                    }
+                    
+                    force -= realFriction * velocity;
+                    
+                    velocity += force * dt;
+                    previousPosition = position;
+                    position += velocity * dt;
+                }
+                
+                if (loop) {
+                    if (position < positionMin) {
+                        position += positionRange;
+                    }
+                    
+                    if (position > positionMax) {
+                        position -= positionRange
+                    }
+                }
+                
+                if (video.paused) {
+                    // update video to match scrubber
+                    let didPositionChange = previousPosition !== position;
+                    if (didPositionChange) {
+                        if (!isNaN(video.duration)) {
+                            const newTime = position * video.duration;
+                            
+                            if (typeof (video.fastSeek) === "function") {
+                                video.fastSeek(newTime);
+                            } else {
+                                video.currentTime = newTime;
+                            }
+                        }
+                    }
+                } else {
+                    // update scrubber to follow video
+                    // TODO: make this follow better
+                    const ratio = dt / video.duration;
+                    position += ratio * (positionMax - positionMin);
+                }
+                
+                
+                //
+                // ! draw
+                //
+                
+                // TODO: use some nice texture for the background
+                const lightGray = "#ddd"
+                context.fillStyle = lightGray;
+                context.fillRect(0, 0, canvas.width, canvas.height);
+                
+                const start = -position * thumbnailStripWidth + canvas.width * 0.5;
+                const end = -position * thumbnailStripWidth + canvas.width * 1.5;
+                
+                if (thumbnailStrip) {
+                    context.drawImage(thumbnailStrip, start, 0);
+                    if (loop) {
+                        context.drawImage(thumbnailStrip, start + thumbnailStripWidth, 0);
+                        context.drawImage(thumbnailStrip, start - thumbnailStripWidth, 0);
+                    }
+                }
+                
+                // draw playhead
+                
+                let playheadPosition = 0;
+                // Move playhead when springing at the edge
+                if (position < positionMin) {
+                    playheadPosition = position - positionMin;
+                }
+                
+                if (position > positionMax) {
+                    playheadPosition = position - positionMax;
+                }
+                
+                const playheadX = -playheadPosition * thumbnailStripWidth + canvas.width / 2;
+                const playheadColor = "#d35";
+                
+                context.beginPath();
+                context.moveTo(playheadX, 0);
+                context.lineTo(playheadX, canvas.height);
+                context.strokeStyle = playheadColor;
+                context.lineWidth = 2;
+                context.stroke();
+                
+                // playhead arrows
+                // TODO: potentially make arrows jut out a little
+                // TODO: perhaps just a little triangle at bottom?
+                const triangleWidth = 10;
+                const triangleHeight = 10;
+                context.beginPath();
+                context.moveTo(playheadX + triangleWidth / 2, 0);
+                context.lineTo(playheadX - triangleWidth / 2, 0);
+                context.lineTo(playheadX, triangleHeight);
+                context.fillStyle = playheadColor;
+                context.fill();
+                
+                context.beginPath();
+                context.moveTo(playheadX + triangleWidth / 2, canvas.height);
+                context.lineTo(playheadX - triangleWidth / 2, canvas.height);
+                context.lineTo(playheadX, canvas.height - triangleHeight);
+                context.fillStyle = playheadColor;
+                context.fill();
+                
+                
+                // Play/pause button
+                
+                // TODO: play button grows when back at start on non-loop
+                // TODO: rewind/replay button on the empty area after end of strip
+                
+                context.beginPath();
+                context.arc(playButtonPosition.x, playButtonPosition.y, playButtonRadius, 0, tau);
+                context.fillStyle = playheadColor;
+                context.fill();
+                
+                
+                
+                context.save();
+                context.translate(playButtonPosition.x, playButtonPosition.y);
+                const triangleSize = playButtonRadius / 2;
+                if (video.paused) {
+                    const drawPlayTriangle = () => {
+                        context.beginPath();
+                        context.moveTo(1, 0);
+                        context.lineTo(Math.cos(tau / 3), Math.sin(tau / 3));
+                        context.lineTo(Math.cos(tau * 2 / 3), Math.sin(tau * 2 / 3));
+                        context.closePath();
+                        context.fillStyle = "white";
+                        context.fill();
+                    }
+                    context.scale(triangleSize, triangleSize);
+                    if (hasVideoEnded()) {
+                        // replay icon
+                        const startAngle = tau/12;
+                        const endAngle = tau*3/4;
+                        context.beginPath();
+                        context.arc(0, 0, 0.8, -startAngle, -endAngle, true);
+                        context.arc(0, 0, 1.2, -endAngle, -startAngle, false);
+                        context.fillStyle = "white";
+                        context.fill();
+                        context.translate(0.2, 0.9);
+                        context.scale(0.8, 0.8);
+                        drawPlayTriangle();
+                    } else {
+                        // play icon
+                        drawPlayTriangle();
+                    }
+                } else {
+                    // pause icon
+                    context.fillStyle = "white";
+                    const pauseSize = 0.8 * triangleSize;
+                    context.scale(pauseSize, pauseSize);
+                    context.fillRect(-1, -1, 0.666, 2);
+                    context.fillRect(0.333 * 1, -1, 0.666, 2);
+                }
+                context.restore();
+                
+                window.requestAnimationFrame(tick);
+            };
+            
+            window.requestAnimationFrame(tick);
+        }
+        scrub({
+            containerSelector: "#purple", 
+            videoUrl: "purple.mp4",
+        });
+        scrub({
+            containerSelector: "#fourier", 
+            videoUrl: "fourier.mp4",
+            loop: true,
+        });
+        
+    </script>
+</body>
+</html>
